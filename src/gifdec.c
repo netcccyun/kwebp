@@ -43,11 +43,12 @@ extern void WebPCopyPixels(const WebPPicture* const src,
 void GIFGetBackgroundColor(const ColorMapObject* const color_map,
                            int bgcolor_index, int transparent_index,
                            uint32_t* const bgcolor) {
+  if (bgcolor == NULL) return;
   if (transparent_index != GIF_INDEX_INVALID &&
       bgcolor_index == transparent_index) {
     *bgcolor = GIF_TRANSPARENT_COLOR;  // Special case.
   } else if (color_map == NULL || color_map->Colors == NULL
-             || bgcolor_index >= color_map->ColorCount) {
+             || bgcolor_index < 0 || bgcolor_index >= color_map->ColorCount) {
     *bgcolor = GIF_WHITE_COLOR;
     fprintf(stderr,
             "GIF decode warning: invalid background color index. Assuming "
@@ -64,10 +65,13 @@ void GIFGetBackgroundColor(const ColorMapObject* const color_map,
 int GIFReadGraphicsExtension(const GifByteType* const buf, int* const duration,
                              GIFDisposeMethod* const dispose,
                              int* const transparent_index) {
+  if (buf == NULL || duration == NULL || dispose == NULL ||
+      transparent_index == NULL || buf[0] != 4) {
+    return 0;
+  }
   const int flags = buf[1];
   const int dispose_raw = (flags >> GIF_DISPOSE_SHIFT) & GIF_DISPOSE_MASK;
   const int duration_raw = buf[2] | (buf[3] << 8);  // In 10 ms units.
-  if (buf[0] != 4) return 0;
   *duration = duration_raw * 10;  // Duration is in 1 ms units.
   switch (dispose_raw) {
     case 3:
@@ -112,6 +116,7 @@ static int Remap(const GifFileType* const gif, const uint8_t* const src,
 
 int GIFReadFrame(GifFileType* const gif, int transparent_index,
                  GIFFrameRect* const gif_rect, WebPPicture* const picture) {
+  if (gif == NULL || gif_rect == NULL || picture == NULL) return 0;
   WebPPicture sub_image;
   const GifImageDesc* const image_desc = &gif->Image;
   uint32_t* dst = NULL;
@@ -119,8 +124,12 @@ int GIFReadFrame(GifFileType* const gif, int transparent_index,
   const GIFFrameRect rect = {
       image_desc->Left, image_desc->Top, image_desc->Width, image_desc->Height
   };
-  const uint64_t memory_needed = 4 * rect.width * (uint64_t)rect.height;
+  const uint64_t memory_needed = 4u * (uint64_t)rect.width *
+                                 (uint64_t)rect.height;
   int ok = 0;
+  if (rect.width <= 0 || rect.height <= 0) {
+    return 0;
+  }
   *gif_rect = rect;
 
   if (memory_needed != (size_t)memory_needed || memory_needed > (4ULL << 32)) {
@@ -174,8 +183,12 @@ int GIFReadFrame(GifFileType* const gif, int transparent_index,
 
 int GIFReadLoopCount(GifFileType* const gif, GifByteType** const buf,
                      int* const loop_count) {
-  assert(!memcmp(*buf + 1, "NETSCAPE2.0", 11) ||
-         !memcmp(*buf + 1, "ANIMEXTS1.0", 11));
+  if (gif == NULL || buf == NULL || *buf == NULL || loop_count == NULL ||
+      (*buf)[0] < 11 ||
+      (memcmp(*buf + 1, "NETSCAPE2.0", 11) &&
+       memcmp(*buf + 1, "ANIMEXTS1.0", 11))) {
+    return 0;
+  }
   if (DGifGetExtensionNext(gif, buf) == GIF_ERROR) {
     return 0;
   }
@@ -191,9 +204,13 @@ int GIFReadLoopCount(GifFileType* const gif, GifByteType** const buf,
 
 int GIFReadMetadata(GifFileType* const gif, GifByteType** const buf,
                     WebPData* const metadata) {
+  if (gif == NULL || buf == NULL || *buf == NULL || metadata == NULL ||
+      (*buf)[0] < 11) {
+    return 0;
+  }
   const int is_xmp = !memcmp(*buf + 1, "XMP DataXMP", 11);
   const int is_icc = !memcmp(*buf + 1, "ICCRGBG1012", 11);
-  assert(is_xmp || is_icc);
+  if (!is_xmp && !is_icc) return 0;
   (void)is_icc;  // silence unused warning.
   // Construct metadata from sub-blocks.
   // Usual case (including ICC profile): In each sub-block, the
@@ -214,6 +231,7 @@ int GIFReadMetadata(GifFileType* const gif, GifByteType** const buf,
     subblock.bytes = is_xmp ? *buf : *buf + 1;
     // Note: We store returned value in 'tmp' first, to avoid
     // leaking old memory in metadata->bytes on error.
+    if (subblock.size > (size_t)-1 - metadata->size) return 0;
     tmp = (uint8_t*)realloc((void*)metadata->bytes,
                             metadata->size + subblock.size);
     if (tmp == NULL) {
@@ -260,17 +278,20 @@ void GIFCopyPixels(const WebPPicture* const src, WebPPicture* const dst) {
 void GIFDisposeFrame(GIFDisposeMethod dispose, const GIFFrameRect* const rect,
                      const WebPPicture* const prev_canvas,
                      WebPPicture* const curr_canvas) {
-  assert(rect != NULL);
+  if (rect == NULL || curr_canvas == NULL) return;
   if (dispose == GIF_DISPOSE_BACKGROUND) {
     GIFClearPic(curr_canvas, rect);
   } else if (dispose == GIF_DISPOSE_RESTORE_PREVIOUS) {
+    if (prev_canvas == NULL || prev_canvas->argb == NULL ||
+        curr_canvas->argb == NULL) {
+      return;
+    }
     const size_t src_stride = prev_canvas->argb_stride;
     const uint32_t* const src = prev_canvas->argb + rect->x_offset
                               + rect->y_offset * src_stride;
     const size_t dst_stride = curr_canvas->argb_stride;
     uint32_t* const dst = curr_canvas->argb + rect->x_offset
                         + rect->y_offset * dst_stride;
-    assert(prev_canvas != NULL);
     WebPCopyPlane((uint8_t*)src, (int)(4 * src_stride),
                   (uint8_t*)dst, (int)(4 * dst_stride),
                   4 * rect->width, rect->height);

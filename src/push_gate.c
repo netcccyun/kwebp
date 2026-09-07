@@ -1,5 +1,6 @@
 #include <string.h>
 #include <assert.h>
+#include <stdint.h>
 #include "upstream.h"
 #include "webp_encode.h"
 #define kgl_align(d, a)     (((d) + (a - 1)) & ~(a - 1))
@@ -9,14 +10,39 @@ bool add_buff_data(webp_buffer* buf, const char* data, int len, int max_length);
 KGL_RESULT begin_response_header(kgl_async_context* ctx, int64_t body_size, kgl_response_body* body);
 KGL_RESULT begin_response(kgl_async_context* ctx);
 
+static bool media_type_is(const char* value, int value_len, const char* expected)
+{
+	const char* start = value;
+	const char* end;
+	size_t expected_len = strlen(expected);
+	if (value == NULL || value_len < 0) return false;
+	end = value + value_len;
+	while (start < end && (*start == ' ' || *start == '\t')) ++start;
+	while (end > start && (end[-1] == ' ' || end[-1] == '\t')) --end;
+	{
+		const char* semicolon = (const char*)memchr(start, ';', (size_t)(end - start));
+		if (semicolon != NULL) end = semicolon;
+	}
+	while (end > start && (end[-1] == ' ' || end[-1] == '\t')) --end;
+	return (size_t)(end - start) == expected_len && strncasecmp(start, expected, expected_len) == 0;
+}
+
+static bool media_type_is_image(const char* value, int value_len)
+{
+	const char* start = value;
+	if (value == NULL || value_len < 6) return false;
+	while (value_len > 0 && (*start == ' ' || *start == '\t')) {
+		++start;
+		--value_len;
+	}
+	return value_len >= 6 && strncasecmp(start, "image/", 6) == 0;
+}
+
 static KGL_RESULT kwebp_write(kgl_response_body_ctx* ctx, const char* buf, int size)
 {
 	kgl_async_context* async_ctx = kgl_get_out_async_context(ctx);
 	webp_context* webp = (webp_context*)async_ctx->module;
 	assert(!webp->no_encode);
-	if (webp->buff.data == NULL && webp->content_length > 0) {
-		realloc_buffer(&webp->buff, webp->content_length);
-	}
 	if (!add_buff_data(&webp->buff, buf, size, webp->max_length)) {
 		return KGL_EINSUFFICIENT_BUFFER;
 	}
@@ -25,6 +51,9 @@ static KGL_RESULT kwebp_write(kgl_response_body_ctx* ctx, const char* buf, int s
 static KGL_RESULT unsupport_writev(kgl_response_body_ctx* ctx, const kbuf * bufs, int length)
 {
 	while (length > 0) {
+		if (bufs == NULL || bufs->used <= 0) {
+			return KGL_EDATA_FORMAT;
+		}
 		int got = KGL_MIN(length, bufs->used);
 		KGL_RESULT result = kwebp_write(ctx, (char*)bufs->data, got);
 		if (result != KGL_OK) {
@@ -61,12 +90,12 @@ static KGL_RESULT kwebp_close(kgl_response_body_ctx* gate, KGL_RESULT result)
 		webp->no_encode = 1;
 	}
 	if (webp->no_encode || !webp->is_webp) {
-		return begin_response_header(ctx,-1,NULL);
+		return begin_response(ctx);
 	}
 	if (!webp_read_picture(webp)) {
 		webp->is_webp = 0;
 		webp->no_encode = 1;
-		return begin_response_header(ctx,-1,NULL);
+		return begin_response(ctx);
 	};
 	return begin_response(ctx);
 }
@@ -81,6 +110,7 @@ static kgl_response_body_function response_body_function = {
 #ifndef _WIN32
 bool realloc_buffer(webp_buffer *buf, int new_len)
 {
+	if (new_len <= 0) return false;
 	if (buf->data==NULL) {
 		assert(buf->used == 0);
 		buf->data = (char *)malloc(new_len);
@@ -99,6 +129,7 @@ bool realloc_buffer(webp_buffer *buf, int new_len)
 #else
 bool realloc_buffer(webp_buffer *buf, int new_len)
 {
+	if (new_len <= 0) return false;
 	if (buf->data==NULL) {
 		buf->data = GlobalAlloc(GMEM_MOVEABLE, new_len);
 		assert(buf->used == 0);
@@ -117,15 +148,22 @@ bool realloc_buffer(webp_buffer *buf, int new_len)
 #endif
 bool add_buff_data(webp_buffer *buf, const char *data, int len, int max_length)
 {
+	if (buf == NULL || len < 0 || max_length <= 0 || (len > 0 && data == NULL)) {
+		return false;
+	}
+	if (len == 0) return true;
 	if (buf->left < len) {
-		int new_len = buf->used + len;
-		if (new_len > max_length) {
+		int new_len;
+		int grow_len;
+		if (buf->used < 0 || buf->used > max_length || len > max_length - buf->used) {
 			//too big
 			return false;
 		}
-		int align_len = 2 * buf->used;
-		align_len = kgl_align(align_len, 4096);
-		new_len = KGL_MAX(new_len, align_len);
+		new_len = buf->used + len;
+		grow_len = buf->used <= max_length / 2 ? 2 * buf->used : max_length;
+		if (grow_len > new_len) new_len = grow_len;
+		if (new_len <= max_length - 4095) new_len = kgl_align(new_len, 4096);
+		if (new_len > max_length) new_len = max_length;
 		if (!realloc_buffer(buf, new_len)) {
 			return false;
 		}
@@ -204,22 +242,28 @@ KGL_RESULT push_header(kgl_output_stream_ctx*gate,kgl_header_type attr, const ch
 	}
 	case kgl_header_content_type:
 	{
-		if (strncasecmp(val, kgl_expand_string("image/")) == 0 && strcasecmp(val, "image/webp") != 0) {
+		if (media_type_is_image(val, val_len) && !media_type_is(val, val_len, "image/webp")) {
 			//result = init_webp_reader(webp, WEBP_JPEG_FORMAT);
 			/*
 			if (strcasecmp(val, "image/gif") == 0) {
-				//gifÌØÊâ´¦Àí
+				//gifç‰¹æ®Šå¤„ç†
 				webp->is_gif = 1;
 				//printf("content-type is gif\n");
 			}
 			*/
 			webp->is_webp = 1;
 			if (webp->accept_support) {
+				char* content_type = kgl_strndup(val, val_len);
+				if (content_type == NULL) {
+					webp->no_encode = 1;
+					buffer_destroy(&webp->buff);
+					break;
+				}
 				if (webp->origin_content_type) {
 					free(webp->origin_content_type);
 				}
-				//°Ñcontent-typeÍ·±£´æ£¬Î´À´Èç¹û×ªÂëÊ§°Ü£¬¿ÉÒÔ·¢»ØÔ­À´µÄÍ·.
-				webp->origin_content_type = kgl_strndup(val, val_len);
+				//æŠŠcontent-typeå¤´ä¿å­˜ï¼Œæœªæ¥å¦‚æžœè½¬ç å¤±è´¥ï¼Œå¯ä»¥å‘å›žåŽŸæ¥çš„å¤´.
+				webp->origin_content_type = content_type;
 				return KGL_OK;
 			}
 		}
@@ -230,7 +274,13 @@ KGL_RESULT push_header(kgl_output_stream_ctx*gate,kgl_header_type attr, const ch
 	case kgl_header_vary:
 	{
 		if (webp->vary == NULL) {
-			webp->vary = (char*)malloc(val_len + 1);
+			if (val_len < 0) return KGL_EINVALID_PARAMETER;
+			webp->vary = (char*)malloc((size_t)val_len + 1);
+			if (webp->vary == NULL) {
+				webp->no_encode = 1;
+				buffer_destroy(&webp->buff);
+				return ctx->out->f->write_header(ctx->out->ctx, attr, val, val_len);
+			}
 			memcpy(webp->vary, val, val_len);
 			webp->vary[val_len] = '\0';
 			webp->vary_len = val_len;
@@ -246,16 +296,19 @@ KGL_RESULT push_header(kgl_output_stream_ctx*gate,kgl_header_type attr, const ch
 KGL_RESULT begin_response_header(kgl_async_context *ctx, int64_t body_size, kgl_response_body *body)
 {
 	webp_context *webp = (webp_context *)ctx->module;
+	KGL_RESULT result;
 	webp->send_header = 1;
 	if (webp->is_webp) {
-		//KD_REQ_OBJ_IDENTITY Ìá¸ß»º´æÃüÖÐÂÊ
+		//KD_REQ_OBJ_IDENTITY æé«˜ç¼“å­˜å‘½ä¸­çŽ‡
 		ctx->f->support_function(webp->rq, ctx->cn, KD_REQ_OBJ_IDENTITY, NULL, NULL);
-		//ÊÇwebp¾ÍÒª·¢ËÍvaryÍ·
+		//æ˜¯webpå°±è¦å‘é€varyå¤´
 		if (webp->vary == NULL) {
-			ctx->out->f->write_header(ctx->out->ctx, kgl_header_vary, kgl_expand_string(WEBP_VARY));
+			result = ctx->out->f->write_header(ctx->out->ctx, kgl_header_vary, kgl_expand_string(WEBP_VARY));
+			if (result != KGL_OK) return result;
 		} else {
-			int new_len = webp->vary_len + sizeof(WEBP_VARY) + 3;
+			size_t new_len = (size_t)webp->vary_len + sizeof(WEBP_VARY) + 2;
 			char *vary = (char *)malloc(new_len);
+			if (vary == NULL) return KGL_ENO_MEMORY;
 			char *hot = vary;
 			memcpy(hot, webp->vary, webp->vary_len);
 			hot += webp->vary_len;
@@ -264,38 +317,39 @@ KGL_RESULT begin_response_header(kgl_async_context *ctx, int64_t body_size, kgl_
 			memcpy(hot, kgl_expand_string(WEBP_VARY));
 			hot += sizeof(WEBP_VARY)-1;
 			*hot = '\0';
-			ctx->out->f->write_header(ctx->out->ctx, kgl_header_vary, vary,(hlen_t)(hot-vary));
+			result = ctx->out->f->write_header(ctx->out->ctx, kgl_header_vary, vary,(hlen_t)(hot-vary));
 			free(vary);
+			if (result != KGL_OK) return result;
 		}
 	}
 	if (webp->no_encode) {
-		//·¢»ØÔ­À´µÄcontent_type,vary,»¹ÓÐcontent_length;
-		if (webp->vary) {
-			ctx->out->f->write_header(ctx->out->ctx, kgl_header_vary, webp->vary, webp->vary_len);
+		//å‘å›žåŽŸæ¥çš„content_type,vary,è¿˜æœ‰content_length;
+		if (!webp->is_webp && webp->vary) {
+			result = ctx->out->f->write_header(ctx->out->ctx, kgl_header_vary, webp->vary, webp->vary_len);
+			if (result != KGL_OK) return result;
 		}
 		if (webp->origin_content_type) {
-			ctx->out->f->write_header(ctx->out->ctx ,kgl_header_content_type, webp->origin_content_type, (hlen_t)strlen(webp->origin_content_type));
+			result = ctx->out->f->write_header(ctx->out->ctx ,kgl_header_content_type, webp->origin_content_type, (hlen_t)strlen(webp->origin_content_type));
+			if (result != KGL_OK) return result;
 		}
 		return ctx->out->f->write_header_finish(ctx->out->ctx, body_size, body);
 	}
-	ctx->out->f->write_header(ctx->out->ctx, kgl_header_content_type, kgl_expand_string("image/webp"));
+	result = ctx->out->f->write_header(ctx->out->ctx, kgl_header_content_type, kgl_expand_string("image/webp"));
+	if (result != KGL_OK) return result;
 	return ctx->out->f->write_header_finish(ctx->out->ctx, -1, &webp->body);
 }
 KGL_RESULT push_header_finish(kgl_output_stream_ctx*gate, int64_t body_size, kgl_response_body *body)
 {
 	kgl_async_context *ctx = kgl_get_out_async_context(gate);
 	webp_context *webp = (webp_context *)ctx->module;
-	if (webp->buff.data) {
-		free(webp->buff.data);
-		webp->buff.data = NULL;
-	}
+	buffer_destroy(&webp->buff);
 	if (body_size > webp->max_length) {
 		webp->no_encode = 1;
-	} else {
+	} else if (body_size >= 0) {
 		webp->content_length = (int)body_size;
 	}
 	if (!webp->is_webp) {
-		//ÔÚheader·¢ËÍÍê£¬»¹Ã»ÊÕµ½content-type
+		//åœ¨headerå‘é€å®Œï¼Œè¿˜æ²¡æ”¶åˆ°content-type
 		webp->no_encode = 1;
 	}
 	if (webp->no_encode) {
@@ -309,13 +363,13 @@ KGL_RESULT push_header_finish(kgl_output_stream_ctx*gate, int64_t body_size, kgl
 KGL_RESULT begin_response(kgl_async_context* ctx)
 {
 	webp_context* webp = (webp_context*)ctx->module;
-	KGL_RESULT result = begin_response_header(ctx, -1,NULL);
+	KGL_RESULT result = begin_response_header(ctx, -1, &webp->body);
 	if (result != KGL_OK) {
 		return result;
 	}
 	if (webp->no_encode) {
 		if (webp->buff.data == NULL) {
-			return webp->body.f->close(webp->body.ctx, result);
+			return webp->body.f->close(webp->body.ctx, webp->upstream_push_body_result);
 		}
 #ifdef _WIN32
 		char* image_mem = (char*)GlobalLock(webp->buff.data);

@@ -1,12 +1,43 @@
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <limits.h>
 #include "ksapi.h"
 #include "mark.h"
 #include "upstream.h"
 #include "vary.h"
 #define MAX_WEBP_SIZE 16777216
+static bool parse_int(const char* text, int* value) {
+	char* end = NULL;
+	long parsed;
+	if (text == NULL || *text == '\0') return false;
+	errno = 0;
+	parsed = strtol(text, &end, 10);
+	if (errno != 0 || *end != '\0' || parsed < INT_MIN || parsed > INT_MAX) return false;
+	*value = (int)parsed;
+	return true;
+}
+static bool get_query_int(const char* query, const char* name, int* value) {
+	size_t name_len = strlen(name);
+	const char* p = query;
+	while (p != NULL && *p != '\0') {
+		const char* segment_end = strchr(p, '&');
+		size_t segment_len = segment_end ? (size_t)(segment_end - p) : strlen(p);
+		if (segment_len > name_len + 1 && memcmp(p, name, name_len) == 0 && p[name_len] == '=') {
+			char number[32];
+			size_t number_len = segment_len - name_len - 1;
+			if (number_len == 0 || number_len >= sizeof(number)) return false;
+			memcpy(number, p + name_len + 1, number_len);
+			number[number_len] = '\0';
+			return parse_int(number, value);
+		}
+		p = segment_end ? segment_end + 1 : NULL;
+	}
+	return false;
+}
 static void* create_ctx() {
 	webp_mark* m = (webp_mark*)malloc(sizeof(webp_mark));
+	if (m == NULL) return NULL;
 	memset(m, 0, sizeof(webp_mark));
 	m->quality = 75;
 	if (!WebPConfigPreset(&m->config, WEBP_PRESET_DEFAULT, (float)m->quality)) {
@@ -42,14 +73,17 @@ static KGL_RESULT parse(kgl_access_parse_config* parse_ctx) {
 	webp_mark* m = (webp_mark*)parse_ctx->module;
 	const char* quality = parse_ctx->body->get_value(parse_ctx->cn, "quality");
 	if (quality) {
-		int v = atoi(quality);
-		if (WebPConfigPreset(&m->config, WEBP_PRESET_DEFAULT, (float)v)) {
+		int v;
+		if (parse_int(quality, &v) && v >= 1 && v <= 100 && WebPConfigPreset(&m->config, WEBP_PRESET_DEFAULT, (float)v)) {
 			m->quality = v;
 		}
 	}
 	const char* max_length = parse_ctx->body->get_value(parse_ctx->cn, "max");
 	if (max_length) {
-		m->max_length = atoi(max_length);
+		int parsed_max;
+		if (parse_int(max_length, &parsed_max) && parsed_max > 0) {
+			m->max_length = parsed_max;
+		}
 	}
 
 	return KGL_OK;
@@ -60,6 +94,9 @@ static uint32_t process(KREQUEST rq, kgl_access_context* ctx, DWORD notify) {
 	buf[0] = '\0';
 	DWORD len = sizeof(buf);
 	webp_context* c = (webp_context*)malloc(sizeof(webp_context));
+	if (c == NULL) {
+		return KF_STATUS_REQ_FALSE;
+	}
 	if (!init_webp_context(c, &m->config)) {
 		free(c);
 		return KF_STATUS_REQ_FINISHED;
@@ -69,22 +106,15 @@ static uint32_t process(KREQUEST rq, kgl_access_context* ctx, DWORD notify) {
 		c->max_length = MAX_WEBP_SIZE;
 	}
 	if (KGL_OK == ctx->f->get_variable(rq, KGL_VAR_QUERY_STRING, NULL, buf, &len)) {
-		char* p = NULL;
-		if (strncmp(buf, "_wpq=", 5) == 0) {
-			p = buf + 5;
-		} else {
-			p = strstr(buf, "&_wpq=");
-			if (p) {
-				p += 6;
-			}
-		}
-		if (p) {
-			int q = atoi(p);
+		int q;
+		if (get_query_int(buf, "_wpq", &q)) {
 			if (q >= 100) {
 				free(c);
 				return KF_STATUS_REQ_FALSE;
 			}
-			WebPConfigPreset(&c->config, WEBP_PRESET_DEFAULT, (float)q);
+			if (q >= 1) {
+				WebPConfigPreset(&c->config, WEBP_PRESET_DEFAULT, (float)q);
+			}
 		}
 	}
 	len = sizeof(buf);

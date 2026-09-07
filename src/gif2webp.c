@@ -34,7 +34,7 @@ enum {
 static int webp_gif_read(GifFileType *gif, GifByteType *buf, int len)
 {
 	webp_buffer *buff = (webp_buffer *)gif->UserData;
-	len = MIN(len,buff->used);
+	len = len < buff->used ? len : buff->used;
 	memcpy(buf,buff->data,len);
 	buff->used -= len;
 	buff->data += len;
@@ -48,7 +48,12 @@ KGL_RESULT gif2webp(webp_context *webp,WebPData *webp_data) {
 	buff.used = webp->buff.used;
 	  int gif_error = GIF_ERROR;
 	KGL_RESULT result = KGL_EUNKNOW;
-	  GifFileType *gif = DGifOpen(&buff ,webp_gif_read, &gif_error);
+	  GifFileType *gif;
+#if LOCAL_GIF_PREREQ(5,0)
+	  gif = DGifOpen(&buff, webp_gif_read, &gif_error);
+#else
+	  gif = DGifOpen(&buff, webp_gif_read);
+#endif
 	  if (gif==NULL) {
 		printf("cann't open gif to read\n");
 		if (gif_error != GIF_OK) {
@@ -134,8 +139,10 @@ KGL_RESULT gif2webp(webp_context *webp,WebPData *webp_data) {
 	        	          frame.use_argb = 1;
 	        	          if (!WebPPictureAlloc(&frame)) goto End;
 	        	          GIFClearPic(&frame, NULL);
-	        	          WebPPictureCopy(&frame, &curr_canvas);
-	        	          WebPPictureCopy(&frame, &prev_canvas);
+		          if (!WebPPictureCopy(&frame, &curr_canvas) ||
+		              !WebPPictureCopy(&frame, &prev_canvas)) {
+		            goto End;
+		          }
 
 	        	          // Background color.
 	        	          GIFGetBackgroundColor(gif->SColorMap, gif->SBackGroundColor,
@@ -195,7 +202,8 @@ KGL_RESULT gif2webp(webp_context *webp,WebPData *webp_data) {
 	        	        orig_dispose = GIF_DISPOSE_NONE;
 	        	        frame_duration = 0;
 	        	        transparent_index = GIF_INDEX_INVALID;
-				if (frame_number * gif->SWidth * gif->SHeight > MAX_GIF_DATA) {
+				if ((uint64_t)frame_number * (uint64_t)gif->SWidth *
+				    (uint64_t)gif->SHeight > MAX_GIF_DATA) {
 					fprintf(stderr,"gif is too big\n");
 					goto End;
 				}

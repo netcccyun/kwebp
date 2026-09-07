@@ -19,18 +19,18 @@ typedef struct _webp_context {
 	union {
 		struct {
 			/*
-			is_webp	no_encode	ÒâÒå
-			0		0			³õÊ¼×´Ì¬
-			0		1			²»ÊÇwebp(µ±È»²»×ª»»)
-			1		1			ÊÇwebp£¬µ«¿Í»§¶Ë²»Ö§³Ö£¬ÕâÖÖ×´Ì¬Òª·¢ËÍvary
-			1		0			ÊÇwebp£¬²¢ÇÒÒ²×ª»»
+			is_webp	no_encode	æ„ä¹‰
+			0		0			åˆå§‹çŠ¶æ€
+			0		1			ä¸æ˜¯webp(å½“ç„¶ä¸è½¬æ¢)
+			1		1			æ˜¯webpï¼Œä½†å®¢æˆ·ç«¯ä¸æ”¯æŒï¼Œè¿™ç§çŠ¶æ€è¦å‘é€vary
+			1		0			æ˜¯webpï¼Œå¹¶ä¸”ä¹Ÿè½¬æ¢
 			*/
-			uint32_t is_webp:1;//ÊÇ·ñÊÇwebp
-			uint32_t no_encode : 1;//²»ĞèÒª×ª»»webp
+			uint32_t is_webp:1;//æ˜¯å¦æ˜¯webp
+			uint32_t no_encode : 1;//ä¸éœ€è¦è½¬æ¢webp
 			uint32_t accept_support : 1;
 			uint32_t upstream_was_body_finish : 1;
 			uint32_t send_header : 1;
-			uint32_t is_gif:1; //uµÄÀàĞÍ£¬ÊÇ·ñÊÇgif_data
+			uint32_t is_gif:1; //uçš„ç±»å‹ï¼Œæ˜¯å¦æ˜¯gif_data
 		};
 		uint32_t flags;
 	};
